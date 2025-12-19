@@ -1,0 +1,5 @@
+{
+  "name": "Olympic Recurve Archery Simulator",
+  "description": "A deep simulation of Olympic recurve archery bracket matches. Compete through rounds of 128 to 8 using the official set system scoring, with AI-driven commentary and skill-based opponent simulation.",
+  "requestFramePermissions": []
+}
