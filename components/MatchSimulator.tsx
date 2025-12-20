@@ -6,6 +6,18 @@ import { getRandomPointForScore } from '../utils/archeryLogic';
 import TargetFace from './TargetFace';
 import BracketView from './BracketView';
 
+// Wake Lock API types
+interface WakeLockSentinel {
+  release(): Promise<void>;
+  readonly type: 'screen' | 'system';
+}
+
+interface NavigatorExtended extends Navigator {
+  wakeLock?: {
+    request(type: 'screen' | 'system'): Promise<WakeLockSentinel>;
+  };
+}
+
 interface Props {
   tournament: TournamentState;
   onMatchComplete: (match: Match) => void;
@@ -39,10 +51,22 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
   const [timeLeft, setTimeLeft] = useState(0);
   const [scheduledOppShots, setScheduledOppShots] = useState<number[]>([]);
   const timerRef = useRef<number | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const simulatingArrowRef = useRef(false);
 
-  const playBuzzer = (count: number) => {
+  const playBuzzer = async (count: number) => {
     try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const audioCtx = audioCtxRef.current;
+      
+      // Resume context if suspended (required for mobile)
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+      
       const now = audioCtx.currentTime;
       const spacing = 1; // More spaced out buzzers
       
@@ -81,17 +105,52 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
   };
 
   const speak = (text: string) => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      // Slower rate and slightly lower pitch for a more dramatic "announcer" feel
-      utterance.rate = 0.85; 
-      utterance.pitch = 0.9;
-      window.speechSynthesis.speak(utterance);
+    console.log('Playing sound for:', text);
+    
+    // Map score text to audio file names
+    const soundMap: { [key: string]: string } = {
+      'Ten': 'ten.mp3',
+      '9': 'nine.mp3',
+      '8': 'eight.mp3',
+      '7': 'seven.mp3',
+      '6': 'six.mp3',
+      '5': 'five.mp3',
+      '4': 'four.mp3',
+      '3': 'three.mp3',
+      '2': 'two.mp3',
+      '1': 'one.mp3',
+      'Miss': 'miss.mp3'
+    };
+    
+    const soundFile = soundMap[text];
+    if (!soundFile) {
+      console.log('No sound file mapping found for:', text, '- skipping audio playback');
+      return;
+    }
+    
+    try {
+      const audio = new Audio(`/sounds/${soundFile}`);
+      audio.volume = 0.7; // Set volume to 70%
+      
+      // Handle audio load errors
+      audio.addEventListener('error', (e) => {
+        console.warn('Audio file failed to load:', soundFile, e);
+      });
+      
+      // Resume audio context if needed for mobile
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume().then(() => {
+          audio.play().catch(e => console.warn('Audio play failed:', e));
+        }).catch(e => console.warn('Audio context resume failed:', e));
+      } else {
+        audio.play().catch(e => console.warn('Audio play failed:', e));
+      }
+    } catch (e) {
+      console.warn('Audio creation failed:', e);
     }
   };
 
-  const startTimedMode = () => {
+  const startTimedMode = async () => {
     if (userCurrentScores.length > 0 || oppCurrentArrows.length > 0) {
       if (!confirm("Start new timed set? Current arrow progress for this set will be lost.")) return;
     }
@@ -106,59 +165,152 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
       Math.floor(Math.random() * 6) + 10   
     ].sort((a, b) => b - a); 
     setScheduledOppShots(shots);
-    playBuzzer(2); // Two buzzers for standby
+    await playBuzzer(2); // Two buzzers for standby
   };
 
   useEffect(() => {
-    if (timerPhase === 'idle') return;
+    if (timerPhase === 'idle') {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      return;
+    }
 
-    timerRef.current = window.setInterval(() => {
-      setTimeLeft((prev) => {
-        const nextValue = prev - 1;
+    if (!timerRef.current) {
+      console.log('Starting timer interval');
+      timerRef.current = window.setInterval(() => {
+        setTimeLeft((prev) => {
+          const nextValue = prev - 1;
 
-        if (nextValue < 0) {
-          if (timerPhase === 'standby') {
-            setTimerPhase('shooting');
-            playBuzzer(1); // One buzzer for start of shooting
-            return 90;
-          } else {
-            setTimerPhase('idle');
-            if (timerRef.current) clearInterval(timerRef.current);
-            playBuzzer(3); // Three buzzers for end of timer
-            return 0;
-          }
-        }
-
-        if (timerPhase === 'shooting') {
-          setScheduledOppShots(currentShots => {
-            if (currentShots.length > 0 && nextValue <= currentShots[0]) {
-              simulateOpponentArrow();
-              return currentShots.slice(1);
+          if (nextValue < 0) {
+            if (timerPhase === 'standby') {
+              setTimerPhase('shooting');
+              playBuzzer(1); // One buzzer for start of shooting
+              return 90;
+            } else {
+              setTimerPhase('idle');
+              return 0;
             }
-            return currentShots;
-          });
-        }
+          }
 
-        return nextValue;
-      });
-    }, 1000);
+          if (timerPhase === 'shooting') {
+            setScheduledOppShots(currentShots => {
+              if (currentShots.length > 0 && nextValue <= currentShots[0]) {
+                simulateOpponentArrow(true); // Play sound in timed mode
+                return currentShots.slice(1);
+              }
+              return currentShots;
+            });
+          }
+
+          return nextValue;
+        });
+      }, 1000);
+    }
 
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
     };
   }, [timerPhase]);
 
-  const simulateOpponentArrow = () => {
-    if (oppCurrentArrows.length >= ARROWS_PER_SET) return;
+  useEffect(() => {
+    const requestWakeLock = async () => {
+      const nav = navigator as NavigatorExtended;
+      if (nav.wakeLock && timerPhase !== 'idle') {
+        try {
+          wakeLockRef.current = await nav.wakeLock.request('screen');
+          wakeLockRef.current.addEventListener('release', () => {
+            console.log('Wake lock was released');
+            wakeLockRef.current = null;
+          });
+        } catch (err) {
+          console.warn('Wake lock request failed:', err);
+        }
+      }
+    };
+
+    const releaseWakeLock = async () => {
+      if (wakeLockRef.current) {
+        try {
+          await wakeLockRef.current.release();
+          wakeLockRef.current = null;
+        } catch (err) {
+          console.warn('Wake lock release failed:', err);
+        }
+      }
+    };
+
+    if (timerPhase !== 'idle') {
+      requestWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+
+    return () => {
+      releaseWakeLock();
+    };
+  }, [timerPhase]);
+
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'visible' && timerPhase !== 'idle' && !wakeLockRef.current) {
+        const nav = navigator as NavigatorExtended;
+        if (nav.wakeLock) {
+          try {
+            wakeLockRef.current = await nav.wakeLock.request('screen');
+            wakeLockRef.current.addEventListener('release', () => {
+              console.log('Wake lock was released');
+              wakeLockRef.current = null;
+            });
+          } catch (err) {
+            console.warn('Wake lock re-request failed:', err);
+          }
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [timerPhase]);
+
+  useEffect(() => {
+    return () => {
+      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+        audioCtxRef.current.close();
+      }
+    };
+  }, []);
+
+  const simulateOpponentArrow = (playSound: boolean = false) => {
+    console.log('simulateOpponentArrow called, current length:', oppCurrentArrows.length, 'simulating:', simulatingArrowRef.current, 'playSound:', playSound);
+    if (simulatingArrowRef.current || oppCurrentArrows.length >= ARROWS_PER_SET) {
+      console.log('Already simulating or have enough arrows, returning');
+      return;
+    }
+
+    simulatingArrowRef.current = true;
 
     const oppSkill = opponent.averageArrowScore;
     const oScore = Math.round(Math.max(0, Math.min(10, (Math.random() * 2 - 1) * 0.8 + oppSkill)));
     const oArrow = { score: oScore, ...getRandomPointForScore(oScore) };
     
+    console.log('Generated opponent score:', oScore);
     setOppCurrentArrows(prev => {
-      if (prev.length >= ARROWS_PER_SET) return prev;
+      if (prev.length >= ARROWS_PER_SET) {
+        simulatingArrowRef.current = false;
+        return prev;
+      }
       const updated = [...prev, oArrow];
-      speak(oScore === 10 ? "Ten" : oScore === 0 ? "Miss" : oScore.toString());
+      if (playSound) {
+        speak(oScore === 10 ? "Ten" : oScore === 0 ? "Miss" : oScore.toString());
+      }
+      simulatingArrowRef.current = false;
       return updated;
     });
   };
