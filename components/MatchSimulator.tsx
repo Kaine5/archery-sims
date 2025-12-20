@@ -104,7 +104,7 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
     }
   };
 
-  const speak = (text: string) => {
+  const speak = async (text: string) => {
     console.log('Playing sound for:', text);
     
     // Map score text to audio file names
@@ -129,24 +129,35 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
     }
     
     try {
-      const audio = new Audio(`/sounds/${soundFile}`);
-      audio.volume = 0.7; // Set volume to 70%
-      
-      // Handle audio load errors
-      audio.addEventListener('error', (e) => {
-        console.warn('Audio file failed to load:', soundFile, e);
-      });
-      
-      // Resume audio context if needed for mobile
-      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume().then(() => {
-          audio.play().catch(e => console.warn('Audio play failed:', e));
-        }).catch(e => console.warn('Audio context resume failed:', e));
-      } else {
-        audio.play().catch(e => console.warn('Audio play failed:', e));
+      // Ensure AudioContext is available and resumed
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
+      const audioCtx = audioCtxRef.current;
+      
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+      
+      // Fetch and decode the audio file
+      const response = await fetch(`/sounds/${soundFile}`);
+      if (!response.ok) {
+        console.warn('Failed to fetch audio file:', soundFile, response.status);
+        return;
+      }
+      
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      
+      // Create and play the audio
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+      source.start(0);
+      
+      console.log('Audio played successfully for:', text);
     } catch (e) {
-      console.warn('Audio creation failed:', e);
+      console.warn('Audio playback failed for', text, ':', e);
     }
   };
 
@@ -308,7 +319,8 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
       }
       const updated = [...prev, oArrow];
       if (playSound) {
-        speak(oScore === 10 ? "Ten" : oScore === 0 ? "Miss" : oScore.toString());
+        // Fire-and-forget audio playback
+        speak(oScore === 10 ? "Ten" : oScore === 0 ? "Miss" : oScore.toString()).catch(e => console.warn('Speak failed:', e));
       }
       simulatingArrowRef.current = false;
       return updated;
