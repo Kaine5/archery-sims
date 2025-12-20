@@ -6,18 +6,6 @@ import { getRandomPointForScore } from '../utils/archeryLogic';
 import TargetFace from './TargetFace';
 import BracketView from './BracketView';
 
-// Wake Lock API types
-interface WakeLockSentinel {
-  release(): Promise<void>;
-  readonly type: 'screen' | 'system';
-}
-
-interface NavigatorExtended extends Navigator {
-  wakeLock?: {
-    request(type: 'screen' | 'system'): Promise<WakeLockSentinel>;
-  };
-}
-
 interface Props {
   tournament: TournamentState;
   onMatchComplete: (match: Match) => void;
@@ -51,21 +39,10 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
   const [timeLeft, setTimeLeft] = useState(0);
   const [scheduledOppShots, setScheduledOppShots] = useState<number[]>([]);
   const timerRef = useRef<number | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
-  const playBuzzer = async (count: number) => {
+  const playBuzzer = (count: number) => {
     try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      const audioCtx = audioCtxRef.current;
-      
-      // Resume context if suspended (required for mobile)
-      if (audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-      }
-      
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const now = audioCtx.currentTime;
       const spacing = 1; // More spaced out buzzers
       
@@ -114,7 +91,7 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
     }
   };
 
-  const startTimedMode = async () => {
+  const startTimedMode = () => {
     if (userCurrentScores.length > 0 || oppCurrentArrows.length > 0) {
       if (!confirm("Start new timed set? Current arrow progress for this set will be lost.")) return;
     }
@@ -129,7 +106,7 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
       Math.floor(Math.random() * 6) + 10   
     ].sort((a, b) => b - a); 
     setScheduledOppShots(shots);
-    await playBuzzer(2); // Two buzzers for standby
+    playBuzzer(2); // Two buzzers for standby
   };
 
   useEffect(() => {
@@ -168,76 +145,6 @@ const MatchSimulator: React.FC<Props> = ({ tournament, onMatchComplete, onReset,
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [timerPhase]);
-
-  useEffect(() => {
-    return () => {
-      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
-        audioCtxRef.current.close();
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    const requestWakeLock = async () => {
-      const nav = navigator as NavigatorExtended;
-      if (nav.wakeLock && timerPhase !== 'idle') {
-        try {
-          wakeLockRef.current = await nav.wakeLock.request('screen');
-          wakeLockRef.current.addEventListener('release', () => {
-            console.log('Wake lock was released');
-            wakeLockRef.current = null;
-          });
-        } catch (err) {
-          console.warn('Wake lock request failed:', err);
-        }
-      }
-    };
-
-    const releaseWakeLock = async () => {
-      if (wakeLockRef.current) {
-        try {
-          await wakeLockRef.current.release();
-          wakeLockRef.current = null;
-        } catch (err) {
-          console.warn('Wake lock release failed:', err);
-        }
-      }
-    };
-
-    if (timerPhase !== 'idle') {
-      requestWakeLock();
-    } else {
-      releaseWakeLock();
-    }
-
-    return () => {
-      releaseWakeLock();
-    };
-  }, [timerPhase]);
-
-  useEffect(() => {
-    const handleVisibilityChange = async () => {
-      if (document.visibilityState === 'visible' && timerPhase !== 'idle' && !wakeLockRef.current) {
-        const nav = navigator as NavigatorExtended;
-        if (nav.wakeLock) {
-          try {
-            wakeLockRef.current = await nav.wakeLock.request('screen');
-            wakeLockRef.current.addEventListener('release', () => {
-              console.log('Wake lock was released');
-              wakeLockRef.current = null;
-            });
-          } catch (err) {
-            console.warn('Wake lock re-request failed:', err);
-          }
-        }
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [timerPhase]);
 
